@@ -23,7 +23,9 @@
   - Dinamik 8-desene sikistirma (k-medoids)
   - Otomatik kirpma ve ara sira cift kirpma
   - Yumusayarak saga, sola, yukariya ve asagiya bakma
-  - Normal, kizgin, yorgun ve mutlu goz sekilleri
+  - Normal, kizgin, yorgun, mutlu ve karanlik krupiye tarzi goz sekilleri
+  - Supheci, hasarli ve cilgin tiplemeler; darbe ve gerilim animasyonlari
+  - Seri Monitor'den tetiklenen sagdan sola yumruk animasyonu
   - Sasirma ve gulme benzeri tek-seferlik sallanma animasyonlari
   - delay() yok; sensor ve motor kodlariyla birlikte calisabilir
 
@@ -66,7 +68,11 @@ enum Ifade : uint8_t {
   NORMAL,
   KIZGIN,
   YORGUN,
-  MUTLU
+  MUTLU,
+  KRUPIYE,
+  SUPHECI,
+  HASARLI,
+  CILGIN
 };
 
 // Otomobil/far tarzi gorunum icin KIZGIN onerilir.
@@ -81,6 +87,11 @@ constexpr bool GOZ_BEBEGI_GOSTER = false;
 constexpr bool OTOMATIK_BAKIS = true;
 constexpr bool OTOMATIK_KIRPMA = true;
 constexpr bool CIFT_KIRPMA = true;
+
+// Ilk proje davranisi: kart acildiginda dogrudan gozler gorunur.
+// Yumruk animasyonu Seri Monitor'den Y (veya geriye uyumluluk icin P)
+// komutuyla istendigi zaman baslatilir.
+constexpr bool ACILISTA_YUMRUK_SAHNESI = false;
 
 // ---------------------------------------------------------------------------
 // EKRAN VE SANAL PIKSEL ALANI
@@ -152,12 +163,27 @@ unsigned long sonrakiKare = 0;
 enum OzelAnimasyon : uint8_t {
   OZEL_YOK,
   OZEL_SASIRMA,
-  OZEL_GULME
+  OZEL_GULME,
+  OZEL_DARBE,
+  OZEL_GERILIM
 };
 
 OzelAnimasyon ozelAnimasyon = OZEL_YOK;
 unsigned long ozelAnimasyonBaslangici = 0;
 unsigned long ozelAnimasyonBitisi = 0;
+
+enum AnaSahne : uint8_t {
+  SAHNE_YUMRUK_GIRISI,
+  SAHNE_GOZLER
+};
+
+AnaSahne aktifSahne = SAHNE_GOZLER;
+unsigned long yumrukSahnesiBaslangici = 0;
+
+// Tek yumruk sahnesinin zaman cizelgesi (milisaniye).
+constexpr uint16_t YUMRUK_DARBE_BASLANGICI = 760;
+constexpr uint16_t YUMRUK_DARBE_BITISI = 1050;
+constexpr uint16_t YUMRUK_SAHNESI_BITISI = 1500;
 
 // ---------------------------------------------------------------------------
 // KUCUK YARDIMCILAR
@@ -167,6 +193,29 @@ int16_t sinirla16(int16_t deger, int16_t enAz, int16_t enCok) {
   if (deger < enAz) return enAz;
   if (deger > enCok) return enCok;
   return deger;
+}
+
+uint16_t ilerleme1000(unsigned long gecen, uint16_t baslangic,
+                      uint16_t bitis) {
+  if (gecen <= baslangic) return 0;
+  if (gecen >= bitis) return 1000;
+  return static_cast<uint16_t>(
+    ((gecen - baslangic) * 1000UL) / (bitis - baslangic)
+  );
+}
+
+// 0..1000 araliginda, baslangici ve bitisi yumusatan smoothstep egrisi.
+uint16_t yumusakIlerleme1000(uint16_t t) {
+  const uint32_t t2 = static_cast<uint32_t>(t) * t;
+  return static_cast<uint16_t>((t2 * (3000UL - 2UL * t)) / 1000000UL);
+}
+
+// Hizin sona dogru yavasladigi ease-out egrisi.
+uint16_t hizliBasla1000(uint16_t t) {
+  const uint16_t ters = 1000 - t;
+  return 1000 - static_cast<uint16_t>(
+    (static_cast<uint32_t>(ters) * ters) / 1000UL
+  );
 }
 
 uint8_t bitSayisi(uint8_t deger) {
@@ -233,6 +282,53 @@ void pikselYaz(int16_t x, int16_t y, bool dolu) {
   pikselTamponu[y][x] = dolu ? 1 : 0;
 }
 
+void doluDikdortgenCiz(int16_t x, int16_t y, int16_t genislik,
+                      int16_t yukseklik, bool dolu = true) {
+  for (int16_t py = y; py < y + yukseklik; py++) {
+    for (int16_t px = x; px < x + genislik; px++) {
+      pikselYaz(px, py, dolu);
+    }
+  }
+}
+
+void doluElipsCiz(int16_t merkezX, int16_t merkezY, int8_t yaricapX,
+                  int8_t yaricapY, bool dolu = true) {
+  const int32_t rx2 = static_cast<int32_t>(yaricapX) * yaricapX;
+  const int32_t ry2 = static_cast<int32_t>(yaricapY) * yaricapY;
+  const int32_t sinir = rx2 * ry2;
+
+  for (int8_t dy = -yaricapY; dy <= yaricapY; dy++) {
+    for (int8_t dx = -yaricapX; dx <= yaricapX; dx++) {
+      const int32_t deger = static_cast<int32_t>(dx) * dx * ry2
+                          + static_cast<int32_t>(dy) * dy * rx2;
+      if (deger <= sinir) pikselYaz(merkezX + dx, merkezY + dy, dolu);
+    }
+  }
+}
+
+void cizgiCiz(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+              bool dolu = true) {
+  const int16_t dx = abs(x1 - x0);
+  const int16_t sx = x0 < x1 ? 1 : -1;
+  const int16_t dy = -abs(y1 - y0);
+  const int16_t sy = y0 < y1 ? 1 : -1;
+  int16_t hata = dx + dy;
+
+  while (true) {
+    pikselYaz(x0, y0, dolu);
+    if (x0 == x1 && y0 == y1) break;
+    const int16_t ikiHata = 2 * hata;
+    if (ikiHata >= dy) {
+      hata += dy;
+      x0 += sx;
+    }
+    if (ikiHata <= dx) {
+      hata += dx;
+      y0 += sy;
+    }
+  }
+}
+
 void gozBebegiOy(int16_t merkezX, int16_t merkezY, int8_t bakisX, int8_t bakisY) {
   const int16_t pupilX = merkezX + bakisX / 2;
   const int16_t pupilY = merkezY + bakisY / 2;
@@ -257,7 +353,11 @@ void tekGozCiz(bool solGoz, int8_t bakisX, int8_t bakisY,
 
   const int16_t temelMerkezX = solGoz ? 26 : 73;
   const int16_t merkezX = temelMerkezX + bakisX + ekstraX;
-  const int16_t merkezY = 16 + bakisY + ekstraY;
+  int16_t merkezY = 16 + bakisY + ekstraY;
+
+  // Cilgin tipte iki goz ayni hizada durmaz; tekinsiz/asimetrik bir gorunum
+  // icin biri yukari, digeri asagi kayar.
+  if (aktifIfade == CILGIN) merkezY += solGoz ? -3 : 3;
 
   for (int8_t dx = -YARI_GENISLIK; dx <= YARI_GENISLIK; dx++) {
     // RoboEyes'e benzer yuvarlatilmis dikdortgen. Elips yerine bu geometriyi
@@ -296,6 +396,44 @@ void tekGozCiz(bool solGoz, int8_t bakisX, int8_t bakisY,
         alt -= (abs(dx) * 5) / YARI_GENISLIK;
         break;
 
+      case KRUPIYE:
+        // Karanlik masa/krupiye havasi: ic kosede sert, dis kosede daralan
+        // sinsice ve tehditkar bir bakis.
+        ust += (icKoseOrani * 8) / (YARI_GENISLIK * 2);
+        alt -= ((YARI_GENISLIK * 2 - icKoseOrani) * 3)
+             / (YARI_GENISLIK * 2);
+        break;
+
+      case SUPHECI:
+        // Tek goz belirgin bicimde kisilir.
+        if (solGoz) {
+          ust += 7;
+          alt -= 2;
+        } else {
+          ust += 2;
+        }
+        break;
+
+      case HASARLI:
+        // Sol goz dar, sag goz daha acik kalir.
+        if (solGoz) {
+          ust += 7;
+          alt -= 4;
+        } else {
+          ust += 2;
+          alt -= 1;
+        }
+        break;
+
+      case CILGIN:
+        // Asimetrik yukseklik ve ters kapak acilari.
+        if (solGoz) {
+          ust += (icKoseOrani * 4) / (YARI_GENISLIK * 2);
+        } else {
+          alt -= (icKoseOrani * 5) / (YARI_GENISLIK * 2);
+        }
+        break;
+
       case NORMAL:
       default:
         break;
@@ -318,6 +456,13 @@ void tekGozCiz(bool solGoz, int8_t bakisX, int8_t bakisY,
   if (GOZ_BEBEGI_GOSTER && gozAcikligi >= 45) {
     gozBebegiOy(merkezX, merkezY, bakisX, bakisY);
   }
+
+  // Hasarli tipte sol gozun uzerindeki iki koyu kesik, yara/çatlak etkisi
+  // verir. Piksel silme islemi goz doldurulduktan sonra yapilir.
+  if (aktifIfade == HASARLI && solGoz && gozAcikligi >= 35) {
+    cizgiCiz(merkezX - 5, merkezY - 8, merkezX + 3, merkezY + 5, false);
+    cizgiCiz(merkezX - 2, merkezY - 7, merkezX + 6, merkezY + 6, false);
+  }
 }
 
 void gozleriTuvaleCiz(unsigned long simdi) {
@@ -325,6 +470,7 @@ void gozleriTuvaleCiz(unsigned long simdi) {
 
   int8_t ekstraX = 0;
   int8_t ekstraY = 0;
+  const uint8_t gercekGozAcikligi = gozAcikligi;
 
   if (ozelAnimasyon != OZEL_YOK) {
     if ((long)(simdi - ozelAnimasyonBitisi) >= 0) {
@@ -334,6 +480,22 @@ void gozleriTuvaleCiz(unsigned long simdi) {
       const int8_t yon = (asama & 1) ? 1 : -1;
       if (ozelAnimasyon == OZEL_SASIRMA) ekstraX = 4 * yon;
       if (ozelAnimasyon == OZEL_GULME) ekstraY = 2 * yon;
+      if (ozelAnimasyon == OZEL_DARBE) {
+        ekstraX = 7 * yon;
+        ekstraY = ((asama / 2) & 1) ? 2 : -2;
+        gozAcikligi = (asama < 3) ? 15 : 55;
+      }
+      if (ozelAnimasyon == OZEL_GERILIM) {
+        // Gozler yavasca kisilir ve yeniden acilir.
+        const uint16_t gecen = simdi - ozelAnimasyonBaslangici;
+        const uint16_t yari = 650;
+        if (gecen < yari) {
+          gozAcikligi = 100 - (gecen * 55UL) / yari;
+        } else {
+          const uint16_t donus = gecen - yari;
+          gozAcikligi = 45 + (donus * 55UL) / yari;
+        }
+      }
     }
   }
 
@@ -342,6 +504,116 @@ void gozleriTuvaleCiz(unsigned long simdi) {
 
   tekGozCiz(true, bakisX, bakisY, ekstraX, ekstraY);
   tekGozCiz(false, bakisX, bakisY, ekstraX, ekstraY);
+  gozAcikligi = gercekGozAcikligi;
+}
+
+// ---------------------------------------------------------------------------
+// SERIAL MONITOR'DEN TETIKLENEN SAGDAN SOLA YUMRUK
+// ---------------------------------------------------------------------------
+
+void yumrukCiz(int16_t merkezX, int16_t merkezY, bool solaBakiyor,
+               uint8_t kolUzunlugu) {
+  const int8_t onYon = solaBakiyor ? -1 : 1;
+
+  // Bilek ve kol, yumrugun arkasina dogru uzanir.
+  if (solaBakiyor) {
+    doluDikdortgenCiz(merkezX + 5, merkezY - 5, kolUzunlugu, 11);
+    doluElipsCiz(merkezX + 5 + kolUzunlugu, merkezY, 4, 5);
+  } else {
+    doluDikdortgenCiz(merkezX - 5 - kolUzunlugu, merkezY - 5,
+                     kolUzunlugu, 11);
+    doluElipsCiz(merkezX - 5 - kolUzunlugu, merkezY, 4, 5);
+  }
+
+  // Avuc ve yumrugun ondeki yuvarlak yuzu.
+  doluDikdortgenCiz(merkezX - 7, merkezY - 5, 15, 11);
+  doluElipsCiz(merkezX, merkezY, 9, 6);
+  doluElipsCiz(merkezX + onYon * 7, merkezY - 1, 4, 5);
+
+  // Ustteki bogumlar ve alttaki basparmak cikintisi.
+  doluElipsCiz(merkezX + onYon * 5, merkezY - 6, 4, 3);
+  doluElipsCiz(merkezX, merkezY - 7, 4, 3);
+  doluElipsCiz(merkezX - onYon * 5, merkezY - 6, 4, 3);
+  doluElipsCiz(merkezX + onYon * 1, merkezY + 5, 6, 3);
+
+  // Parmak ayrimlarini belirginlestiren kisa oyuklar.
+  cizgiCiz(merkezX + onYon * 3, merkezY - 8,
+           merkezX + onYon * 3, merkezY - 5, false);
+  cizgiCiz(merkezX - onYon * 2, merkezY - 8,
+           merkezX - onYon * 2, merkezY - 5, false);
+  cizgiCiz(merkezX - onYon * 6, merkezY - 6,
+           merkezX - onYon * 4, merkezY - 3, false);
+}
+
+void yumrukHareketCizgileriCiz(int16_t yumrukX, int16_t merkezY) {
+  // Sag yumrugun arkasinda kalan uc hiz cizgisi.
+  cizgiCiz(yumrukX + 14, merkezY - 8, yumrukX + 30, merkezY - 8);
+  cizgiCiz(yumrukX + 17, merkezY,     yumrukX + 35, merkezY);
+  cizgiCiz(yumrukX + 14, merkezY + 8, yumrukX + 28, merkezY + 8);
+}
+
+void darbeYildiziCiz(int16_t merkezX, int16_t merkezY, uint8_t boyut) {
+  cizgiCiz(merkezX - boyut, merkezY, merkezX + boyut, merkezY);
+  cizgiCiz(merkezX, merkezY - boyut, merkezX, merkezY + boyut);
+  cizgiCiz(merkezX - boyut + 2, merkezY - boyut + 2,
+           merkezX + boyut - 2, merkezY + boyut - 2);
+  cizgiCiz(merkezX + boyut - 2, merkezY - boyut + 2,
+           merkezX - boyut + 2, merkezY + boyut - 2);
+  doluElipsCiz(merkezX, merkezY, 3, 3, false);
+}
+
+void yumrukSahnesiniBaslat(unsigned long simdi) {
+  aktifSahne = SAHNE_YUMRUK_GIRISI;
+  yumrukSahnesiBaslangici = simdi;
+
+  // Yumruk bittiginde gozler temiz bir durumdan devam etsin.
+  kirpmaDurumu = KIRPMA_BEKLEME;
+  gozAcikligi = 100;
+  kalanKirpma = 0;
+  bakisX100 = 0;
+  bakisY100 = 0;
+  hedefBakisX = 0;
+  hedefBakisY = 0;
+  ozelAnimasyon = OZEL_YOK;
+}
+
+void yumrukSahnesiniBitir(unsigned long simdi) {
+  aktifSahne = SAHNE_GOZLER;
+  sonrakiKirpma = simdi + random(1700, 3301);
+  sonrakiBakis = simdi + random(700, 1401);
+}
+
+void yumrukSahnesiniTuvaleCiz(unsigned long simdi) {
+  const unsigned long gecen = simdi - yumrukSahnesiBaslangici;
+  tuvaliTemizle();
+
+  if (gecen >= YUMRUK_SAHNESI_BITISI) {
+    yumrukSahnesiniBitir(simdi);
+    gozleriTuvaleCiz(simdi);
+    return;
+  }
+
+  // Sag yumruk ekranin sag disindan girer, yuzunu sola cevirir ve ekranin
+  // tamamini sabit ve okunakli bir hizla kat ederek soldan cikar. Bu tek
+  // sekilli sahne, 8 ozel karakter sinirinda daha nettir.
+  const uint16_t ham = ilerleme1000(gecen, 0, YUMRUK_SAHNESI_BITISI);
+  const uint16_t p = ham;
+  int16_t yumrukX = 105 - (133L * p) / 1000;  // 105 -> -28
+
+  // Darbe bolgesinde yumrugu iki piksel saga-sola oynat ve buyuk bir
+  // carpma yildizi goster. Böylece hareketin "yumruk" oldugu belirginlesir.
+  int8_t titresim = 0;
+  if (gecen >= YUMRUK_DARBE_BASLANGICI && gecen < YUMRUK_DARBE_BITISI) {
+    titresim = ((gecen / 55) & 1) ? 2 : -2;
+  }
+
+  yumrukHareketCizgileriCiz(yumrukX + titresim, 16);
+  yumrukCiz(yumrukX + titresim, 16, true, 22);
+
+  if (gecen >= YUMRUK_DARBE_BASLANGICI && gecen < YUMRUK_DARBE_BITISI) {
+    const uint8_t boyut = 8 + ((gecen / 70) & 1) * 3;
+    darbeYildiziCiz(24 + titresim, 16, boyut);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +810,13 @@ void prototipleriKumele(Desen prototipler[]) {
   }
 }
 
+bool aktifCgramTekTipMi() {
+  for (uint8_t k = 1; k < OZEL_DESEN_SAYISI; k++) {
+    if (!desenlerAyni(aktifCgram[0], aktifCgram[k])) return false;
+  }
+  return true;
+}
+
 void enIyiSekizDeseniOlustur(Desen yeniPrototipler[]) {
   // Kullanilmayan slotlar kareler arasinda ayni kalsin.
   for (uint8_t k = 0; k < OZEL_DESEN_SAYISI; k++) {
@@ -551,7 +830,9 @@ void enIyiSekizDeseniOlustur(Desen yeniPrototipler[]) {
     return;
   }
 
-  if (!cgramHazir) {
+  // Onceki kare tamamen bossa sekiz slot da ayni olabilir. Bu durumda yeni
+  // sahnenin ilk ayrintili karesini sifirdan cesitli merkezlerle baslat.
+  if (!cgramHazir || aktifCgramTekTipMi()) {
     ilkPrototipleriSec(yeniPrototipler);
   }
 
@@ -724,7 +1005,7 @@ void ifadeyiGuncelle(unsigned long simdi) {
 
   Ifade yeniIfade;
   do {
-    yeniIfade = static_cast<Ifade>(random(0, 4));
+    yeniIfade = static_cast<Ifade>(random(0, 8));
   } while (yeniIfade == aktifIfade);
 
   aktifIfade = yeniIfade;
@@ -734,23 +1015,58 @@ void ifadeyiGuncelle(unsigned long simdi) {
 void ozelAnimasyonuBaslat(OzelAnimasyon animasyon, unsigned long simdi) {
   ozelAnimasyon = animasyon;
   ozelAnimasyonBaslangici = simdi;
-  ozelAnimasyonBitisi = simdi + 900;
+  ozelAnimasyonBitisi = simdi + ((animasyon == OZEL_GERILIM) ? 1300 : 900);
+}
+
+void seriMenuyuYazdir() {
+  Serial.println();
+  Serial.println("=== ROBOEYES LCD KOMUTLARI ===");
+  Serial.println("1 = Normal ifade");
+  Serial.println("2 = Kizgin ifade");
+  Serial.println("3 = Yorgun ifade");
+  Serial.println("4 = Mutlu ifade");
+  Serial.println("5 = Krupiye (karanlik masa)");
+  Serial.println("6 = Supheci (tek goz kisik)");
+  Serial.println("7 = Hasarli (cizikli goz)");
+  Serial.println("8 = Cilgin (asimetrik gozler)");
+  Serial.println("B = Goz kirp");
+  Serial.println("S = Sasirma");
+  Serial.println("G = Gulme");
+  Serial.println("H = Darbe alma");
+  Serial.println("T = Gerilim bakisi");
+  Serial.println("Y = YUMRUK (sagdan sola)");
+  Serial.println("? = Bu menuyu tekrar goster");
+  Serial.println("Bir komut yazip Gonder'e basin.");
+  Serial.println("=============================");
 }
 
 void seriKomutlariOku(unsigned long simdi) {
   while (Serial.available() > 0) {
     const char komut = Serial.read();
     switch (komut) {
-      case '1': aktifIfade = NORMAL;  break;
-      case '2': aktifIfade = KIZGIN;  break;
-      case '3': aktifIfade = YORGUN;  break;
-      case '4': aktifIfade = MUTLU;   break;
+      case '1': aktifIfade = NORMAL;  Serial.println("Secildi: Normal"); break;
+      case '2': aktifIfade = KIZGIN;  Serial.println("Secildi: Kizgin"); break;
+      case '3': aktifIfade = YORGUN;  Serial.println("Secildi: Yorgun"); break;
+      case '4': aktifIfade = MUTLU;   Serial.println("Secildi: Mutlu");  break;
+      case '5': aktifIfade = KRUPIYE; Serial.println("Secildi: Krupiye"); break;
+      case '6': aktifIfade = SUPHECI; Serial.println("Secildi: Supheci"); break;
+      case '7': aktifIfade = HASARLI; Serial.println("Secildi: Hasarli"); break;
+      case '8': aktifIfade = CILGIN;  Serial.println("Secildi: Cilgin");  break;
       case 'b':
-      case 'B': kirpmayiBaslat(simdi); break;
+      case 'B': kirpmayiBaslat(simdi); Serial.println("Animasyon: Goz kirpma"); break;
       case 's':
-      case 'S': ozelAnimasyonuBaslat(OZEL_SASIRMA, simdi); break;
+      case 'S': ozelAnimasyonuBaslat(OZEL_SASIRMA, simdi); Serial.println("Animasyon: Sasirma"); break;
       case 'g':
-      case 'G': ozelAnimasyonuBaslat(OZEL_GULME, simdi); break;
+      case 'G': ozelAnimasyonuBaslat(OZEL_GULME, simdi); Serial.println("Animasyon: Gulme"); break;
+      case 'h':
+      case 'H': ozelAnimasyonuBaslat(OZEL_DARBE, simdi); Serial.println("Animasyon: Darbe alma"); break;
+      case 't':
+      case 'T': ozelAnimasyonuBaslat(OZEL_GERILIM, simdi); Serial.println("Animasyon: Gerilim"); break;
+      case 'y':
+      case 'Y':
+      case 'p':
+      case 'P': yumrukSahnesiniBaslat(simdi); Serial.println("Animasyon: YUMRUK"); break;
+      case '?': seriMenuyuYazdir(); break;
       default: break;
     }
   }
@@ -789,8 +1105,12 @@ void setup() {
   sonrakiIfade = simdi + 10000;
   sonrakiKare = simdi;
 
+  if (ACILISTA_YUMRUK_SAHNESI) {
+    yumrukSahnesiniBaslat(simdi);
+  }
+
   Serial.println("RoboEyes LCD 20x4 basladi.");
-  Serial.println("Komutlar: 1=normal 2=kizgin 3=yorgun 4=mutlu B=kirp S=sasir G=gul");
+  seriMenuyuYazdir();
 }
 
 void loop() {
@@ -801,8 +1121,12 @@ void loop() {
     // Program gecikmisse yuzlerce eski kareyi yakalamaya calisma.
     sonrakiKare = simdi + KARE_SURESI_MS;
 
-    animasyonuGuncelle(simdi);
-    gozleriTuvaleCiz(simdi);
+    if (aktifSahne == SAHNE_YUMRUK_GIRISI) {
+      yumrukSahnesiniTuvaleCiz(simdi);
+    } else {
+      animasyonuGuncelle(simdi);
+      gozleriTuvaleCiz(simdi);
+    }
     kareyiEkranaGonder();
   }
 
