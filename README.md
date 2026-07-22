@@ -2,7 +2,7 @@
 
 20×4 karakter LCD üzerinde otomobil farlarını andıran hareketli robot gözleri oluşturmak için geliştirilmiş Arduino projesidir. Kod; göz kırpma, çift kırpma, yumuşak bakış hareketleri ve farklı yüz ifadeleri sunar.
 
-Bu çalışma, [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes) projesinin animasyon yaklaşımından esinlenmiştir. Ancak RoboEyes kütüphanesinin doğrudan portu değildir. Grafik OLED yerine HD44780 tabanlı karakter LCD kullanabilmek için çizim ve görüntü sıkıştırma motoru bu proje kapsamında yeniden geliştirilmiştir.
+HD44780 tabanlı karakter LCD kullanabilmek için çizim ve görüntü sıkıştırma motoru bu proje kapsamında yeniden geliştirilmiştir.
 
 ## Özellikler
 
@@ -285,7 +285,5 @@ Animasyonun akıcı kalması için `loop()` içinde uzun `delay()` çağrıları
 ## Kaynak ve teşekkür
 
 Animasyon davranışı ve robot göz tasarımı için ilham kaynağı:
-
-- [FluxGarage/RoboEyes](https://github.com/FluxGarage/RoboEyes)
 
 Bu depodaki Arduino kodu, 20×4 karakter LCD'nin HD44780/CGRAM yapısı için bağımsız olarak geliştirilmiştir.
