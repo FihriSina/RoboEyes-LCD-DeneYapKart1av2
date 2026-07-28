@@ -189,10 +189,22 @@ constexpr uint16_t YUMRUK_SAHNESI_BITISI = 1500;
 // KUCUK YARDIMCILAR
 // ---------------------------------------------------------------------------
 
+// Bir 5x8 hucre satirinin yalnizca alt 5 biti anlamlidir; ust bitler yok
+// sayilir. Bu maske ve erisimci, desen fonksiyonlarindaki "& B11111"
+// tekrarini tek yerde toplar.
+constexpr uint8_t SATIR_MASKESI = B11111;
+
 int16_t sinirla16(int16_t deger, int16_t enAz, int16_t enCok) {
   if (deger < enAz) return enAz;
   if (deger > enCok) return enCok;
   return deger;
+}
+
+// millis() tabanli zamanlayicilarin tasmaya dayanikli "vakit geldi mi"
+// karsilastirmasi. loop() genelindeki (long)(simdi - hedef) >= 0 idiyomunu
+// tek noktada toplar.
+inline bool zamaniGeldi(unsigned long simdi, unsigned long hedef) {
+  return (long)(simdi - hedef) >= 0;
 }
 
 uint16_t ilerleme1000(unsigned long gecen, uint16_t baslangic,
@@ -222,6 +234,11 @@ uint8_t bitSayisi(uint8_t deger) {
   return __builtin_popcount(static_cast<unsigned int>(deger));
 }
 
+// Bir hucre satirinin anlamli (alt 5 bit) piksellerini dondurur.
+inline uint8_t desenSatiri(const Desen &desen, uint8_t y) {
+  return desen.satir[y] & SATIR_MASKESI;
+}
+
 bool desenlerAyni(const Desen &a, const Desen &b) {
   return memcmp(a.satir, b.satir, HUCRE_YUKSEKLIK) == 0;
 }
@@ -229,7 +246,7 @@ bool desenlerAyni(const Desen &a, const Desen &b) {
 uint8_t desenUzakligi(const Desen &a, const Desen &b) {
   uint8_t uzaklik = 0;
   for (uint8_t y = 0; y < HUCRE_YUKSEKLIK; y++) {
-    uzaklik += bitSayisi((a.satir[y] ^ b.satir[y]) & B11111);
+    uzaklik += bitSayisi(desenSatiri(a, y) ^ desenSatiri(b, y));
   }
   return uzaklik;
 }
@@ -237,29 +254,29 @@ uint8_t desenUzakligi(const Desen &a, const Desen &b) {
 uint8_t desenGosterimHatasi(const Desen &hedef, const Desen &gosterilen) {
   uint8_t hata = 0;
   for (uint8_t y = 0; y < HUCRE_YUKSEKLIK; y++) {
-    const uint8_t hedefSatir = hedef.satir[y] & B11111;
-    const uint8_t gosterilenSatir = gosterilen.satir[y] & B11111;
+    const uint8_t hedefSatir = desenSatiri(hedef, y);
+    const uint8_t gosterilenSatir = desenSatiri(gosterilen, y);
     const uint8_t eksikPiksel = hedefSatir & ~gosterilenSatir;
     const uint8_t fazlaPiksel = gosterilenSatir & ~hedefSatir;
 
     // Arka planda yanlislikla yanan tek bir nokta, goz kenarindaki eksik bir
     // noktadan daha rahatsiz edicidir. Bu nedenle fazla piksel 5 kat cezali.
-    hata += bitSayisi(eksikPiksel & B11111);
-    hata += 5 * bitSayisi(fazlaPiksel & B11111);
+    hata += bitSayisi(eksikPiksel);
+    hata += 5 * bitSayisi(fazlaPiksel);
   }
   return hata;
 }
 
 bool desenBos(const Desen &desen) {
   for (uint8_t y = 0; y < HUCRE_YUKSEKLIK; y++) {
-    if ((desen.satir[y] & B11111) != 0) return false;
+    if (desenSatiri(desen, y) != 0) return false;
   }
   return true;
 }
 
 bool desenDolu(const Desen &desen) {
   for (uint8_t y = 0; y < HUCRE_YUKSEKLIK; y++) {
-    if ((desen.satir[y] & B11111) != B11111) return false;
+    if (desenSatiri(desen, y) != SATIR_MASKESI) return false;
   }
   return true;
 }
@@ -473,7 +490,7 @@ void gozleriTuvaleCiz(unsigned long simdi) {
   const uint8_t gercekGozAcikligi = gozAcikligi;
 
   if (ozelAnimasyon != OZEL_YOK) {
-    if ((long)(simdi - ozelAnimasyonBitisi) >= 0) {
+    if (zamaniGeldi(simdi, ozelAnimasyonBitisi)) {
       ozelAnimasyon = OZEL_YOK;
     } else {
       const uint8_t asama = (simdi - ozelAnimasyonBaslangici) / 65;
@@ -515,15 +532,14 @@ void yumrukCiz(int16_t merkezX, int16_t merkezY, bool solaBakiyor,
                uint8_t kolUzunlugu) {
   const int8_t onYon = solaBakiyor ? -1 : 1;
 
-  // Bilek ve kol, yumrugun arkasina dogru uzanir.
-  if (solaBakiyor) {
-    doluDikdortgenCiz(merkezX + 5, merkezY - 5, kolUzunlugu, 11);
-    doluElipsCiz(merkezX + 5 + kolUzunlugu, merkezY, 4, 5);
-  } else {
-    doluDikdortgenCiz(merkezX - 5 - kolUzunlugu, merkezY - 5,
-                     kolUzunlugu, 11);
-    doluElipsCiz(merkezX - 5 - kolUzunlugu, merkezY, 4, 5);
-  }
+  // Bilek ve kol, yumrugun arkasina dogru uzanir. Kolun sol ucu ve bilek
+  // elipsinin merkezi bakis yonune gore aynalanir.
+  const int16_t kolX = solaBakiyor
+    ? (merkezX + 5)
+    : (merkezX - 5 - kolUzunlugu);
+  const int16_t bilekX = solaBakiyor ? (kolX + kolUzunlugu) : kolX;
+  doluDikdortgenCiz(kolX, merkezY - 5, kolUzunlugu, 11);
+  doluElipsCiz(bilekX, merkezY, 4, 5);
 
   // Avuc ve yumrugun ondeki yuvarlak yuzu.
   doluDikdortgenCiz(merkezX - 7, merkezY - 5, 15, 11);
@@ -577,6 +593,11 @@ void yumrukSahnesiniBaslat(unsigned long simdi) {
   ozelAnimasyon = OZEL_YOK;
 }
 
+// Yumruk sahnesinde darbenin gorsel olarak vurgulandigi zaman araligi.
+inline bool yumrukDarbeAninda(unsigned long gecen) {
+  return gecen >= YUMRUK_DARBE_BASLANGICI && gecen < YUMRUK_DARBE_BITISI;
+}
+
 void yumrukSahnesiniBitir(unsigned long simdi) {
   aktifSahne = SAHNE_GOZLER;
   sonrakiKirpma = simdi + random(1700, 3301);
@@ -603,14 +624,14 @@ void yumrukSahnesiniTuvaleCiz(unsigned long simdi) {
   // Darbe bolgesinde yumrugu iki piksel saga-sola oynat ve buyuk bir
   // carpma yildizi goster. Böylece hareketin "yumruk" oldugu belirginlesir.
   int8_t titresim = 0;
-  if (gecen >= YUMRUK_DARBE_BASLANGICI && gecen < YUMRUK_DARBE_BITISI) {
+  if (yumrukDarbeAninda(gecen)) {
     titresim = ((gecen / 55) & 1) ? 2 : -2;
   }
 
   yumrukHareketCizgileriCiz(yumrukX + titresim, 16);
   yumrukCiz(yumrukX + titresim, 16, true, 22);
 
-  if (gecen >= YUMRUK_DARBE_BASLANGICI && gecen < YUMRUK_DARBE_BITISI) {
+  if (yumrukDarbeAninda(gecen)) {
     const uint8_t boyut = 8 + ((gecen / 70) & 1) * 3;
     darbeYildiziCiz(24 + titresim, 16, boyut);
   }
@@ -846,7 +867,7 @@ void cgramiGuncelle(const Desen yeniPrototipler[]) {
     if (!cgramHazir || !desenlerAyni(yeniPrototipler[k], aktifCgram[k])) {
       uint8_t satirlar[HUCRE_YUKSEKLIK];
       for (uint8_t y = 0; y < HUCRE_YUKSEKLIK; y++) {
-        satirlar[y] = yeniPrototipler[k].satir[y] & B11111;
+        satirlar[y] = desenSatiri(yeniPrototipler[k], y);
       }
       lcd.createChar(k, satirlar);
       aktifCgram[k] = yeniPrototipler[k];
@@ -921,7 +942,7 @@ void kirpmayiGuncelle(unsigned long simdi) {
   switch (kirpmaDurumu) {
     case KIRPMA_BEKLEME:
       gozAcikligi = 100;
-      if (OTOMATIK_KIRPMA && (long)(simdi - sonrakiKirpma) >= 0) {
+      if (OTOMATIK_KIRPMA && zamaniGeldi(simdi, sonrakiKirpma)) {
         kirpmayiBaslat(simdi);
       }
       break;
@@ -976,7 +997,7 @@ void kirpmayiGuncelle(unsigned long simdi) {
 }
 
 void bakisiGuncelle(unsigned long simdi) {
-  if (OTOMATIK_BAKIS && (long)(simdi - sonrakiBakis) >= 0) {
+  if (OTOMATIK_BAKIS && zamaniGeldi(simdi, sonrakiBakis)) {
     int8_t yeniX;
     int8_t yeniY;
 
@@ -1117,7 +1138,7 @@ void loop() {
   const unsigned long simdi = millis();
   seriKomutlariOku(simdi);
 
-  if ((long)(simdi - sonrakiKare) >= 0) {
+  if (zamaniGeldi(simdi, sonrakiKare)) {
     // Program gecikmisse yuzlerce eski kareyi yakalamaya calisma.
     sonrakiKare = simdi + KARE_SURESI_MS;
 
