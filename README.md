@@ -18,6 +18,7 @@ HD44780 tabanlı karakter LCD kullanabilmek için çizim ve görüntü sıkışt
 - Şaşırma ve gülme benzeri kısa animasyonlar içerir.
 - `delay()` kullanmaz; sensör, motor ve kumanda kodlarıyla birlikte çalışabilir.
 - Yalnızca değişen LCD hücrelerini güncelleyerek ekran titremesini azaltır.
+- I²C hatalarını Seri Monitör'e bildirir; bağlantı koparsa ekranı saniyede bir yeniden kurmayı dener.
 
 ## Çalışma mantığı
 
@@ -226,6 +227,10 @@ void loop() {
   const unsigned long simdi = millis();
   seriKomutlariOku(simdi);
 
+  if (!lcdCalisiyor && (long)(simdi - sonrakiLcdKurtarma) >= 0) {
+    lcdBaslat(simdi);
+  }
+
   if ((long)(simdi - sonrakiKare) >= 0) {
     sonrakiKare = simdi + KARE_SURESI_MS;
 
@@ -235,7 +240,7 @@ void loop() {
       animasyonuGuncelle(simdi);
       gozleriTuvaleCiz(simdi);
     }
-    kareyiEkranaGonder();
+    kareyiEkranaGonder(simdi);
   }
 
   // Sensor, motor ve kumanda kodlari buraya eklenebilir.
@@ -256,7 +261,11 @@ Animasyonun akıcı kalması için `loop()` içinde uzun `delay()` çağrıları
 
 - I²C adresini `0x27` yerine `0x3F` yaparak deneyin.
 - LCD dönüştürücüsündeki kontrast potansiyometresini yavaşça çevirin.
-- Seri Monitör'deki `LCD bulunamadi` mesajını kontrol edin.
+- Seri Monitör'deki `LCD bulunamadi` ve `LCD hatasi (...)` mesajlarını kontrol edin.
+
+### Ekran çalışırken kararıyor veya donuyor
+
+Kod her karenin sonunda LCD'yi I²C üzerinden yoklar. Yanıt gelmezse Seri Monitör'e `LCD hatasi (kare yazma): ...` yazar, özel karakter ve hücre önbelleklerini geçersiz kılar ve saniyede bir yeniden bağlanmayı dener. Bağlantı geri geldiğinde `LCD yeniden baglandi.` mesajı görünür ve ekranın tamamı yeniden çizilir.
 
 ### Görüntü bozuk veya titriyor
 
