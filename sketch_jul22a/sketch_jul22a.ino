@@ -133,6 +133,21 @@ bool cgramHazir = false;
 uint8_t tekilDesenSayisi = 0;
 
 // ---------------------------------------------------------------------------
+// LCD BAGLANTI DURUMU
+// ---------------------------------------------------------------------------
+
+// I2C hattinda LCD kaybolursa (kablo cikmasi, gerilim dususu, parazit) cizim
+// islemleri sessizce bosa gider. Asagidaki durum bilgisi hatayi gorunur kilar
+// ve baglanti geri geldiginde ekrani sifirdan kurar.
+constexpr unsigned long LCD_KURTARMA_ARALIGI_MS = 1000;
+
+bool i2cHazir = false;
+bool lcdCalisiyor = false;
+bool lcdHatasiBildirildi = false;
+unsigned long sonrakiLcdKurtarma = 0;
+uint32_t lcdHataSayaci = 0;
+
+// ---------------------------------------------------------------------------
 // ANIMASYON DURUMU
 // ---------------------------------------------------------------------------
 
@@ -264,9 +279,76 @@ bool desenDolu(const Desen &desen) {
   return true;
 }
 
-bool lcdBagliMi() {
+// I2C hata kodunu okunabilir bir metne cevirir.
+const char *i2cHataMetni(uint8_t kod) {
+  switch (kod) {
+    case 0: return "basarili";
+    case 1: return "veri tampona sigmadi";
+    case 2: return "adres NACK (LCD yanit vermiyor)";
+    case 3: return "veri NACK";
+    case 5: return "zaman asimi";
+    default: return "bilinmeyen I2C hatasi";
+  }
+}
+
+// Hata kodunu dogrudan dondurur; cagiran taraf hatayi yok saymak yerine
+// isleyebilir.
+uint8_t lcdYoklamaHatasi() {
+  if (!i2cHazir) return 4;
   Wire.beginTransmission(LCD_ADRESI);
-  return Wire.endTransmission() == 0;
+  return Wire.endTransmission();
+}
+
+// LCD yaniti kesildiginde cagrilir: onbellekler gecersizlenir, hata bir kez
+// raporlanir ve kurtarma denemesi zamanlanir.
+void lcdHatasiBildir(const char *asama, uint8_t kod, unsigned long simdi) {
+  lcdHataSayaci++;
+  lcdCalisiyor = false;
+  cgramHazir = false;
+  memset(eskiHucreHaritasi, 254, sizeof(eskiHucreHaritasi));
+  sonrakiLcdKurtarma = simdi + LCD_KURTARMA_ARALIGI_MS;
+
+  // Her karede tekrarlayan hata mesaji Seri Monitor'u doldurmasin.
+  if (!lcdHatasiBildirildi) {
+    lcdHatasiBildirildi = true;
+    Serial.print("LCD hatasi (");
+    Serial.print(asama);
+    Serial.print("): ");
+    Serial.print(i2cHataMetni(kod));
+    Serial.print(" [kod ");
+    Serial.print(kod);
+    Serial.print(", toplam ");
+    Serial.print(lcdHataSayaci);
+    Serial.println("]");
+  }
+}
+
+// Ekrani sifirdan kurar. Basarili olursa true doner.
+bool lcdBaslat(unsigned long simdi) {
+  const uint8_t kod = lcdYoklamaHatasi();
+  if (kod != 0) {
+    lcdHatasiBildir("yoklama", kod, simdi);
+    return false;
+  }
+
+  lcd.init();
+  lcd.backlight();
+
+  const uint8_t kurulumKodu = lcdYoklamaHatasi();
+  if (kurulumKodu != 0) {
+    lcdHatasiBildir("init", kurulumKodu, simdi);
+    return false;
+  }
+
+  // Kurtarma sonrasi ekran icerigi bilinmiyor; tum onbellekler bosaltilir ki
+  // sonraki kare butun hucreleri yeniden yazsin.
+  cgramHazir = false;
+  memset(aktifCgram, 0, sizeof(aktifCgram));
+  memset(eskiHucreHaritasi, 254, sizeof(eskiHucreHaritasi));
+
+  lcdCalisiyor = true;
+  lcdHatasiBildirildi = false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -893,7 +975,11 @@ void hucreHaritasiniEkranaYaz() {
   }
 }
 
-void kareyiEkranaGonder() {
+// Kareyi ekrana gonderir. LCD yanit vermiyorsa false doner ve cagiran taraf
+// kurtarma islemine gecer.
+bool kareyiEkranaGonder(unsigned long simdi) {
+  if (!lcdCalisiyor) return false;
+
   hucreDesenleriniCikar();
   tekilDesenleriBul();
 
@@ -902,6 +988,15 @@ void kareyiEkranaGonder() {
   cgramiGuncelle(yeniPrototipler);
   hucreHaritasiniOlustur(aktifCgram);
   hucreHaritasiniEkranaYaz();
+
+  // LiquidCrystal_I2C yazma hatasi dondurmez; bu nedenle kare sonunda hat
+  // yoklanir. ACK gelmezse yazilanlar ekrana ulasmamis demektir.
+  const uint8_t kod = lcdYoklamaHatasi();
+  if (kod != 0) {
+    lcdHatasiBildir("kare yazma", kod, simdi);
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,7 +1162,17 @@ void seriKomutlariOku(unsigned long simdi) {
       case 'p':
       case 'P': yumrukSahnesiniBaslat(simdi); Serial.println("Animasyon: YUMRUK"); break;
       case '?': seriMenuyuYazdir(); break;
-      default: break;
+
+      // Satir sonu karakterleri Seri Monitor tarafindan eklenir; komut degil.
+      case '\r':
+      case '\n':
+        break;
+
+      default:
+        Serial.print("Bilinmeyen komut: '");
+        Serial.print(komut);
+        Serial.println("'. Menu icin ? gonderin.");
+        break;
     }
   }
 }
@@ -1084,22 +1189,26 @@ void animasyonuGuncelle(unsigned long simdi) {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(SDA, SCL);
-  Wire.setClock(I2C_HIZI);
-
-  if (!lcdBagliMi()) {
-    Serial.println("LCD bulunamadi. Baglantilari ve 0x27/0x3F adresini kontrol edin.");
-  }
-
-  lcd.init();
-  lcd.backlight();
 
   memset(aktifCgram, 0, sizeof(aktifCgram));
   memset(eskiHucreHaritasi, 254, sizeof(eskiHucreHaritasi));
 
+  i2cHazir = Wire.begin(SDA, SCL);
+  if (!i2cHazir) {
+    Serial.println("I2C baslatilamadi. SDA/SCL pinlerini kontrol edin.");
+  } else {
+    Wire.setClock(I2C_HIZI);
+  }
+
   randomSeed(esp_random());
 
   const unsigned long simdi = millis();
+
+  if (!lcdBaslat(simdi)) {
+    Serial.println("LCD bulunamadi. Baglantilari ve 0x27/0x3F adresini kontrol edin.");
+    Serial.println("Baglanti geri geldiginde ekran otomatik olarak kurulacak.");
+  }
+
   sonrakiKirpma = simdi + 1700;
   sonrakiBakis = simdi + 800;
   sonrakiIfade = simdi + 10000;
@@ -1109,6 +1218,7 @@ void setup() {
     yumrukSahnesiniBaslat(simdi);
   }
 
+
   Serial.println("RoboEyes LCD 20x4 basladi.");
   seriMenuyuYazdir();
 }
@@ -1116,6 +1226,14 @@ void setup() {
 void loop() {
   const unsigned long simdi = millis();
   seriKomutlariOku(simdi);
+
+  // LCD kopmussa animasyon zamanlamasi ilerlemeye devam eder; ekran ise
+  // belirli araliklarla yeniden kurulmaya calisilir.
+  if (!lcdCalisiyor && (long)(simdi - sonrakiLcdKurtarma) >= 0) {
+    if (lcdBaslat(simdi)) {
+      Serial.println("LCD yeniden baglandi.");
+    }
+  }
 
   if ((long)(simdi - sonrakiKare) >= 0) {
     // Program gecikmisse yuzlerce eski kareyi yakalamaya calisma.
@@ -1127,7 +1245,7 @@ void loop() {
       animasyonuGuncelle(simdi);
       gozleriTuvaleCiz(simdi);
     }
-    kareyiEkranaGonder();
+    kareyiEkranaGonder(simdi);
   }
 
   // Motor, sensor ve kumanda kodlarinizi buraya ekleyebilirsiniz.
